@@ -1,0 +1,13 @@
+cit:
+  compose: true
+  mode: health
+  port: 3000
+  health: /_health
+  # Migrations run against a cold postgres before the web service starts.
+  wait: 300
+
+build:
+  variants:
+    - tag: latest
+      containerfile: Containerfile
+      default: true

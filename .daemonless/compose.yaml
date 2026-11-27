@@ -1,0 +1,36 @@
+# CIT test compose: throwaway credentials, for CI only. Host networking because
+# CIT checks the port on 127.0.0.1.
+name: outline-cit
+
+services:
+  outline:
+    image: ghcr.io/daemonless/outline:build-latest
+    network_mode: host
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      - URL=http://localhost:3000
+      - PORT=3000
+      # SECRET_KEY and UTILS_SECRET unset: this tests generating them into /config.
+      - DATABASE_URL=postgres://outline:outline@localhost:5432/outline
+      - PGSSLMODE=disable
+      - REDIS_URL=redis://localhost:6379
+      - FORCE_HTTPS=false
+
+  postgres:
+    image: ghcr.io/daemonless/postgres:18
+    network_mode: host
+    annotations:
+      org.freebsd.jail.allow.sysvipc: "true"
+    environment:
+      - POSTGRES_USER=outline
+      - POSTGRES_PASSWORD=outline
+      - POSTGRES_DB=outline
+
+  redis:
+    image: ghcr.io/daemonless/redis:latest
+    network_mode: host

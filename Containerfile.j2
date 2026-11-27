@@ -1,0 +1,122 @@
+ARG BASE_VERSION=15
+
+ARG UPSTREAM_URL="https://api.github.com/repos/outline/outline/releases/latest"
+
+# --- builder ---------------------------------------------------------------
+FROM ghcr.io/daemonless/base-exec:${BASE_VERSION} AS builder
+
+ARG UPSTREAM_URL
+
+RUN pkg update && \
+    pkg install -y node24 npm-node24 corepack git-tiny jq && \
+    pkg clean -ay && \
+    rm -rf /var/cache/pkg/* /var/db/pkg/repos/*
+
+WORKDIR /src
+RUN VERSION="$(fetch -qo - "${UPSTREAM_URL}" | jq -r '.tag_name')" && \
+    case "${VERSION}" in v[0-9]*) ;; *) echo "unexpected upstream tag: ${VERSION}"; exit 1 ;; esac && \
+    echo "Building Outline ${VERSION}" && \
+    fetch -qo /tmp/src.tar.gz \
+      "https://github.com/outline/outline/archive/refs/tags/${VERSION}.tar.gz" && \
+    tar -C /src -xzf /tmp/src.tar.gz --strip-components 1 && \
+    rm /tmp/src.tar.gz && \
+    printf '%s' "${VERSION#v}" > /tmp/app-version
+
+RUN corepack enable && corepack prepare --activate
+
+# The lockfile carries freebsd-x64 variants for every native dep, so --immutable
+# resolves natively. Don't add packages here: it breaks the frozen install.
+RUN yarn install --immutable --network-timeout 1000000
+
+# @swc/core has no FreeBSD binding (freebsd-x64 stopped at 1.3.11, and the
+# wasm32-wasi package its loader falls back to was never published). Point it at
+# upstream's @swc/wasm build of the same version; npm --no-save keeps yarn.lock
+# immutable.
+COPY patches/ /tmp/patches/
+RUN SWC_VERSION="$(node -p "require('/src/node_modules/@swc/core/package.json').version")" && \
+    echo "@swc/core ${SWC_VERSION} -> @swc/wasm ${SWC_VERSION}" && \
+    npm install --no-save --no-audit --no-fund --prefix /tmp/swcwasm "@swc/wasm@${SWC_VERSION}" && \
+    rm -rf /src/node_modules/@swc/wasm && \
+    mv /tmp/swcwasm/node_modules/@swc/wasm /src/node_modules/@swc/wasm && \
+    rm -rf /tmp/swcwasm && \
+    cp /tmp/patches/swc-core-wasm.cjs /src/node_modules/@swc/core/index.js && \
+    node -e "const s=require('/src/node_modules/@swc/core'); \
+      if (typeof s.transformFileSync !== 'function') { console.error('swc adapter missing transformFileSync'); process.exit(1); } \
+      console.log('swc wasm adapter active');"
+
+# vite's bundle is the memory-hungry step; upstream uses 24G in their own CI.
+ENV NODE_OPTIONS="--max-old-space-size=4096"
+RUN yarn build
+
+# wasm swc duplicates a directory basename when a file imports the package root it
+# sits inside ("../models" for ".."), which is MODULE_NOT_FOUND at boot. Repairs
+# those and asserts every relative require resolves.
+RUN node /tmp/patches/fix-swc-paths.cjs /src/build
+
+RUN yarn workspaces focus --production && yarn cache clean
+
+# Before the COPY: a chmod in the final stage duplicates the tree into a new layer.
+# .sequelizerc loads .env unconditionally; without the file dotenvx prints a
+# MISSING_ENV_FILE banner on every start.
+RUN touch /src/.env && chmod -R a+rX /src/build /src/server /src/public /src/node_modules /src/package.json /src/.sequelizerc /src/.env
+
+# --- runtime ---------------------------------------------------------------
+FROM ghcr.io/daemonless/base-exec:${BASE_VERSION}
+
+ARG FREEBSD_ARCH=amd64
+ARG UPSTREAM_URL
+ARG PACKAGES="node24 ca_root_nss"
+ARG HEALTHCHECK_ENDPOINT="http://localhost:3000/_health"
+
+ENV HEALTHCHECK_URL="${HEALTHCHECK_ENDPOINT}"
+# Upstream defaults to s3, whose SDK needs a native binding with no FreeBSD build.
+ENV FILE_STORAGE="local"
+ENV FILE_STORAGE_LOCAL_ROOT_DIR="/config/data"
+ENV NODE_ENV=production
+ENV PORT=3000
+
+LABEL org.opencontainers.image.title="{{ title }}" \
+      org.opencontainers.image.description="{{ description }}" \
+      org.opencontainers.image.source="{{ repo_url }}" \
+      org.opencontainers.image.url="{{ web_url }}" \
+      org.opencontainers.image.documentation="https://docs.getoutline.com/" \
+      org.opencontainers.image.licenses="BUSL-1.1" \
+      org.opencontainers.image.vendor="daemonless" \
+      org.opencontainers.image.authors="daemonless" \
+      io.daemonless.category="{{ category }}" \
+      io.daemonless.port="3000" \
+      io.daemonless.volumes="/config" \
+      io.daemonless.arch="${FREEBSD_ARCH}" \
+      io.daemonless.pkg-source="source" \
+      io.daemonless.upstream-url="${UPSTREAM_URL}" \
+      io.daemonless.upstream-jq='.tag_name | sub("^v"; "")' \
+      io.daemonless.healthcheck-url="${HEALTHCHECK_ENDPOINT}" \
+      io.daemonless.packages="${PACKAGES}"
+
+RUN pkg update && \
+    pkg install -y ${PACKAGES} && \
+    pkg clean -ay && \
+    rm -rf /var/cache/pkg/* /var/db/pkg/repos/*
+
+RUN mkdir -m 0755 -p /app /config/data
+
+# server/ ships too: .sequelizerc resolves migrations from server/migrations/*.js
+# at runtime.
+COPY --from=builder /src/build /app/build
+COPY --from=builder /src/server /app/server
+COPY --from=builder /src/public /app/public
+COPY --from=builder /src/node_modules /app/node_modules
+COPY --from=builder /src/package.json /app/package.json
+COPY --from=builder /src/.sequelizerc /app/.sequelizerc
+COPY --from=builder /src/.env /app/.env
+COPY --from=builder /tmp/app-version /app/version
+
+COPY root/ /
+
+RUN chmod +x /daemonless/libexec/outline /daemonless/init.d/* /healthz
+
+CMD ["/daemonless/libexec/outline"]
+
+EXPOSE 3000
+
+VOLUME /config
