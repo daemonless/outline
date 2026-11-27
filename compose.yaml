@@ -1,0 +1,186 @@
+name: outline
+
+x-daemonless:
+  title: "Outline"
+  icon: ":simple-outline:"
+  category: "Productivity"
+  description: "A fast, collaborative knowledge base for your team, with rich-text documents, nested collections and full-text search."
+  upstream_url: "https://github.com/outline/outline"
+  web_url: "https://www.getoutline.com/"
+  freshports_url: ""
+  user: "bsd"
+  mlock: false
+  upstream_binary: false
+  appjail: false
+  community: "Discord:https://discord.gg/Kb9tkhecZT"
+
+  # Outline is the one people open; its database and cache stay private.
+  networking:
+    outline: default
+    "*": private
+  hostnames:
+    postgres: POSTGRES_HOSTNAME
+    redis: REDIS_HOSTNAME
+
+  docs:
+    services:
+      outline: "Collaborative knowledge base web UI and API"
+      postgres: "PostgreSQL database for documents, collections and users"
+      redis: "Redis cache and pub/sub broker for real-time collaboration"
+    env:
+      PUID: "User ID for the application process"
+      PGID: "Group ID for the application process"
+      TZ: "Timezone for the container"
+      CONFIG_LOCATION: "Host folder for secrets and uploaded files"
+      POSTGRES_DATA_LOCATION: "Host folder for the database"
+      REDIS_DATA_LOCATION: "Host folder for the cache"
+      URL:
+        desc: "Public URL of this instance, as the browser reaches it. Outline builds links from it"
+        level: primary
+      WEB_HOST_PORT:
+        desc: "Host port for the web UI"
+        optional: true
+      POSTGRES_PASSWORD: "PostgreSQL password"
+      PORT: "Port Outline listens on inside the container"
+      DATABASE_URL: "PostgreSQL connection string. The compose builds it from POSTGRES_PASSWORD"
+      PGSSLMODE: "Set to disable for a PostgreSQL without TLS, as in this stack"
+      REDIS_URL: "Redis connection string"
+      POSTGRES_HOSTNAME:
+        desc: "Where Outline finds PostgreSQL (fjord sets this; postgres on the default stack network)"
+        optional: true
+        level: advanced
+      REDIS_HOSTNAME:
+        desc: "Where Outline finds Redis (fjord sets this; redis on the default stack network)"
+        optional: true
+        level: advanced
+      FORCE_HTTPS:
+        desc: "Redirect every request to https. Keep false unless URL is https"
+        optional: true
+      SECRET_KEY:
+        desc: "64 hex characters (`openssl rand -hex 32`). Generated into /config/secrets.env if unset"
+        optional: true
+        level: advanced
+      UTILS_SECRET:
+        desc: "A second, different secret. Generated with SECRET_KEY if unset"
+        optional: true
+        level: advanced
+      SMTP_HOST:
+        desc: "Mail server. Outline has no passwords: without this or single sign-on, nobody can sign back in"
+        optional: true
+        level: options
+      SMTP_PORT:
+        desc: "Mail server port"
+        optional: true
+        level: options
+      SMTP_USERNAME:
+        desc: "Mail server username"
+        optional: true
+        level: options
+      SMTP_PASSWORD:
+        desc: "Mail server password"
+        optional: true
+        level: options
+      SMTP_FROM_EMAIL:
+        desc: "Address mail is sent from"
+        optional: true
+        level: options
+      SMTP_SECURE:
+        desc: "Connect to the mail server over TLS"
+        optional: true
+        level: options
+      OIDC_CLIENT_ID:
+        desc: "Single sign-on client ID"
+        optional: true
+        level: options
+      OIDC_CLIENT_SECRET:
+        desc: "Single sign-on client secret"
+        optional: true
+        level: options
+      OIDC_ISSUER_URL:
+        desc: "Single sign-on issuer URL"
+        optional: true
+        level: options
+      OIDC_DISPLAY_NAME:
+        desc: "Name on the single sign-on button"
+        optional: true
+        level: options
+    volumes:
+      /config: "Secrets, and uploaded files under /config/data"
+      /var/lib/postgresql/data: "PostgreSQL data"
+    ports:
+      3000: "Web UI"
+
+  readme:
+    setup: |-
+      The first visit asks for a workspace name and an admin account, and signs you in. To sign in again later, Outline needs a way to prove who you are, because it has no passwords: set up `SMTP_*` for sign-in links by email, or `OIDC_*` for single sign-on. Other providers are in the [authentication docs](https://docs.getoutline.com/s/hosting/doc/authentication-7ViUmeMISY). Do this before you sign out.
+
+      `URL` must match what the browser uses. Behind a reverse proxy with TLS, set `URL` to the https address and keep `FORCE_HTTPS=false`, because the proxy handles the redirect.
+
+      Uploads are stored under `/config/data`. S3 storage does not work on FreeBSD: its AWS library needs a native binding that has no FreeBSD build.
+
+      `SECRET_KEY` and `UTILS_SECRET` are generated into `/config/secrets.env` on first start. Keep `/config`: a new `SECRET_KEY` signs everyone out and makes encrypted fields unreadable.
+
+      Outline uses the Business Source License 1.1, which is not an open source license. You can run it for your own team, but not as a commercial document service for others.
+
+services:
+  outline:
+    image: ghcr.io/daemonless/outline:latest
+    container_name: outline
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - TZ=${TZ:-UTC}
+      - URL=${URL}
+      - PORT=3000
+      - SECRET_KEY=${SECRET_KEY:-}
+      - UTILS_SECRET=${UTILS_SECRET:-}
+      - DATABASE_URL=postgres://outline:${POSTGRES_PASSWORD}@${POSTGRES_HOSTNAME:-postgres}:5432/outline
+      - PGSSLMODE=disable
+      - REDIS_URL=redis://${REDIS_HOSTNAME:-redis}:6379
+      - FORCE_HTTPS=${FORCE_HTTPS:-false}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-}
+      - SMTP_USERNAME=${SMTP_USERNAME:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM_EMAIL=${SMTP_FROM_EMAIL:-}
+      - SMTP_SECURE=${SMTP_SECURE:-true}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET:-}
+      - OIDC_ISSUER_URL=${OIDC_ISSUER_URL:-}
+      - OIDC_DISPLAY_NAME=${OIDC_DISPLAY_NAME:-OpenID Connect}
+    volumes:
+      - ${CONFIG_LOCATION}:/config
+    ports:
+      - target: 3000
+        published: ${WEB_HOST_PORT:-3000}
+
+  postgres:
+    image: ghcr.io/daemonless/postgres:18
+    container_name: outline-postgres
+    restart: unless-stopped
+    annotations:
+      org.freebsd.jail.allow.sysvipc: "true"
+    environment:
+      - POSTGRES_USER=outline
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=outline
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - TZ=${TZ:-UTC}
+    volumes:
+      - ${POSTGRES_DATA_LOCATION}:/var/lib/postgresql/data
+
+  redis:
+    image: ghcr.io/daemonless/redis:latest
+    container_name: outline-redis
+    restart: unless-stopped
+    environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - TZ=${TZ:-UTC}
+    volumes:
+      - ${REDIS_DATA_LOCATION}:/config

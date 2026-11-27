@@ -1,0 +1,70 @@
+#!/bin/sh
+# Start Outline; /init has already dropped to the run user.
+
+export HOME=/config
+export NODE_ENV=production
+export PORT="${PORT:-3000}"
+export FILE_STORAGE_LOCAL_ROOT_DIR="${FILE_STORAGE_LOCAL_ROOT_DIR:-/config/data}"
+
+# SECRET_KEY encrypts stored fields and signs sessions, so it has to stay stable
+# across restarts: a fresh one logs everyone out. Generate both once into /config
+# and reuse them; an explicit environment variable always wins.
+secrets_file=/config/secrets.env
+if [ -z "${SECRET_KEY}" ] || [ -z "${UTILS_SECRET}" ]; then
+    if [ ! -f "${secrets_file}" ]; then
+        (
+            umask 077
+            {
+                echo "SECRET_KEY=$(openssl rand -hex 32)"
+                echo "UTILS_SECRET=$(openssl rand -hex 32)"
+            } > "${secrets_file}"
+        )
+        echo "[outline] Generated SECRET_KEY and UTILS_SECRET in ${secrets_file}"
+    fi
+    stored_secret=$(sed -n 's/^SECRET_KEY=//p' "${secrets_file}")
+    stored_utils=$(sed -n 's/^UTILS_SECRET=//p' "${secrets_file}")
+    : "${SECRET_KEY:=${stored_secret}}"
+    : "${UTILS_SECRET:=${stored_utils}}"
+    export SECRET_KEY UTILS_SECRET
+fi
+
+# Outline validates these at boot and dies on a stack trace if any is missing;
+# say which one plainly instead.
+missing=""
+for var in DATABASE_URL REDIS_URL SECRET_KEY UTILS_SECRET URL; do
+    eval "value=\$${var}"
+    [ -z "${value}" ] && missing="${missing} ${var}"
+done
+if [ -n "${missing}" ]; then
+    echo "[outline] Required environment not set:${missing}" >&2
+    exit 1
+fi
+
+cd /app || exit 1
+
+# server/utils/startup.ts refuses to boot while migrations are pending. The app
+# decides TLS from PGSSLMODE, but sequelize-cli reads server/config/database.js,
+# which hard-codes ssl under "production"; "production-ssl-disabled" is upstream's
+# way out. Use --env, not NODE_ENV: some migrations shell out to scripts that
+# reject any other NODE_ENV.
+migrate_env=production
+if [ "${PGSSLMODE}" = "disable" ]; then
+    migrate_env=production-ssl-disabled
+fi
+
+# On a first boot PostgreSQL's temporary initdb server accepts connections and
+# then shuts down under the migration, so keep trying while it settles.
+echo "[outline] Running database migrations (--env ${migrate_env})..."
+tries=0
+until node node_modules/.bin/sequelize db:migrate --env "${migrate_env}"; do
+    tries=$((tries + 1))
+    if [ "${tries}" -ge 12 ]; then
+        echo "[outline] Database migration failed" >&2
+        exit 1
+    fi
+    echo "[outline] Database not ready, trying again in 5s (${tries}/12)"
+    sleep 5
+done
+
+echo "[outline] Starting Outline..."
+exec node build/server/index.js

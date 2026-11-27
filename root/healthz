@@ -1,0 +1,5 @@
+#!/bin/sh
+# Daemonless standard healthcheck for outline
+# /_health runs `SELECT 1`, so this covers the database too.
+
+fetch -qo - "http://127.0.0.1:${PORT:-3000}/_health" 2>/dev/null | grep -q .
